@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import cdist
 from scipy.spatial import Delaunay
 from run_simulation import run_simulation
 from pyDOE import lhs
@@ -10,51 +11,39 @@ from plotting import (
 
 # Hyperparameters
 INIT_SAMPLES = 10
-MAX_ITER = 5000
+MAX_ITER = 2000
 noise_std = 300.0
+lengthscale = 1.0   # for RBF kernel
+signal_var = 1.0    # prior signal variance
 
-# Kalman Filter
-class KalmanProfitFilter:
-    def __init__(self):
-        self.mu = {}
-        self.var = {}
-
-    def update(self, x, y_obs, noise=noise_std):
-        x_key = tuple(x)
-        if x_key not in self.mu:
-            self.mu[x_key] = y_obs
-            self.var[x_key] = noise**2
-        else:
-            prior_mu = self.mu[x_key]
-            prior_var = self.var[x_key]
-            kalman_gain = prior_var / (prior_var + noise**2)
-            new_mu = prior_mu + kalman_gain * (y_obs - prior_mu)
-            new_var = (1 - kalman_gain) * prior_var
-            self.mu[x_key] = new_mu
-            self.var[x_key] = new_var
-
-    def get(self, x):
-        x_key = tuple(x)
-        return self.mu.get(x_key, 0), self.var.get(x_key, noise_std**2)
-
-# Parameter space
-price_range = np.linspace(1, 10.0, 100)
+# Parameter space (grid)
 baristas_range = np.arange(1, 6)
+price_range    = np.linspace(1, 10.0, 100)
+grid = np.array([[b, p] for b in baristas_range for p in price_range])
+n_grid = len(grid)
 
-def sample_params(n):
-    # Generate LHS samples in 2D [baristas, price] ∈ [0,1]
-    lhs_samples = lhs(2, samples=n, criterion='maximin')
+# Vector Kalman Filter for variance only
+class VectorKalmanVar:
+    def __init__(self, grid, lengthscale, signal_var, noise_var):
+        # Compute prior covariance K0 using RBF kernel
+        dists = cdist(grid, grid, 'euclidean')
+        K0 = signal_var * np.exp(-0.5 * (dists / lengthscale)**2)
+        # Initial covariance: prior + measurement noise on diagonal
+        self.P = K0 + noise_var * np.eye(len(grid))
+        self.noise_var = noise_var
 
-    # Scale baristas from [0,1] to discrete values in baristas_range
-    baristas_idx = np.floor(lhs_samples[:, 0] * len(baristas_range)).astype(int)
-    baristas_idx = np.clip(baristas_idx, 0, len(baristas_range) - 1)
-    baristas = baristas_range[baristas_idx]
+    def update(self, idx):
+        # Kalman variance-only update for measurement at idx
+        Pii = self.P[idx, idx]
+        K   = self.P[:, idx] / (Pii + self.noise_var)
+        # Covariance update: P <- P - K * P[idx, :]
+        self.P -= np.outer(K, self.P[idx, :])
 
-    # Scale prices from [0,1] to continuous values in price_range range
-    prices = lhs_samples[:, 1] * (price_range[-1] - price_range[0]) + price_range[0]
+    def predict_var(self):
+        # Return variance at all grid points
+        return np.diag(self.P).copy()
 
-    return np.column_stack((baristas, prices))
-
+# Delaunay interpolation for means
 def interpolate_profit(points, values, queries):
     tri = Delaunay(points)
     simplex = tri.find_simplex(queries)
@@ -68,58 +57,74 @@ def interpolate_profit(points, values, queries):
     interpolated[valid] = np.einsum('ij,ij->i', values[verts], bary_coords)
     return interpolated
 
-def acquisition(mu, sigma, beta=5.0):
+# Acquisition function (UCB)
+def acquisition(mu, sigma, beta=2.0):
     return mu + beta * np.sqrt(sigma)
 
+# Latin Hypercube sampling over grid indices
+def sample_grid_indices(n):
+    lhs_samples = lhs(2, samples=n, criterion='maximin')
+    b_idx = np.floor(lhs_samples[:, 0] * len(baristas_range)).astype(int)
+    p_idx = np.floor(lhs_samples[:, 1] * len(price_range)).astype(int)
+    b_idx = np.clip(b_idx, 0, len(baristas_range)-1)
+    p_idx = np.clip(p_idx, 0, len(price_range)-1)
+    return b_idx * len(price_range) + p_idx
+
+# Main optimization loop
 def main():
-    data = []
-    kf = KalmanProfitFilter()
-    acquisition_trace = []
+    # Initialize variance filter
+    vkf = VectorKalmanVar(grid, lengthscale, signal_var, noise_std**2)
+    data = []       # list of (idx, profit)
+    trace = []
 
-    samples = sample_params(INIT_SAMPLES)
-    for p in samples:
-        profit = run_simulation(p[1], p[0])
-        kf.update(p, profit)
-        data.append((*p, profit))
+    # Initial sampling
+    init_idx = sample_grid_indices(INIT_SAMPLES)
+    for idx in init_idx:
+        b, p = grid[idx]
+        profit = run_simulation(p, b)
+        # record data and update variance
+        data.append((idx, profit))
+        vkf.update(idx)
 
-    for iter in range(MAX_ITER):
-        df = pd.DataFrame(data, columns=['baristas', 'price', 'profit'])
-        points = df[['baristas', 'price']].values
-        profits = df['profit'].values
-        grid = np.array([[b, p] for b in baristas_range for p in price_range])
+    # Iterative optimization
+    for i in range(MAX_ITER):
+        # Retrieve sampled points for mean interpolation
+        points = np.array([grid[idx] for idx, _ in data])
+        profits = np.array([profit for _, profit in data])
+        # Mean prediction via Delaunay
+        mu_pred = interpolate_profit(points, profits, grid)
+        # Variance prediction via Kalman
+        sigma_pred = vkf.predict_var()
 
-        try:
-            mu_pred = interpolate_profit(points, profits, grid)
-        except:
-            mu_pred = np.zeros(len(grid))
-
-        known_variances = np.array([kf.get(pt)[1] for pt in points])
-        try:
-            sigma_pred = interpolate_profit(points, known_variances, grid)
-        except:
-            sigma_pred = np.full(len(grid), noise_std**2)
-
+        # Acquisition
         scores = acquisition(mu_pred, sigma_pred)
         best_idx = np.argmax(scores)
-        acquisition_trace.append(scores[best_idx])
-        next_point = grid[best_idx]
-        baristas, price = next_point
+        trace.append(scores[best_idx])
 
-        profit = run_simulation(price, baristas)
-        kf.update(next_point, profit)
-        data.append((baristas, price, profit))
+        # Evaluate and update
+        b, p = grid[best_idx]
+        profit = run_simulation(p, b)
+        data.append((best_idx, profit))
+        vkf.update(best_idx)
 
-        if (iter + 1) % 100 == 0:
-            print(f"[Iter {iter+1}] Tested (baristas={baristas}, price={price:.2f}) → Profit = {profit:.2f}")
+        if (i+1) % 100 == 0:
+            print(f"[Iter {i+1}] idx={best_idx} (baristas={b}, price={p:.2f}) -> profit={profit:.2f}")
 
-    df_final = pd.DataFrame(data, columns=['baristas', 'price', 'profit'])
-    df_final.to_csv("results.csv", index=False)
-    print("Optimization finished. Results saved to results.csv")
+    # Save results
+    df = pd.DataFrame([ (grid[idx,0], grid[idx,1], prof) for idx, prof in data ],
+                      columns=['baristas','price','profit'])
+    df.to_csv('results.csv', index=False)
+    print('Done. Results in results.csv')
 
-    plot_variance_surface(grid, sigma_pred, baristas_range, price_range)
-    plot_final_surface(df_final, baristas_range, price_range)
-    plot_voronoi(df_final)
-    plot_acquisition_trace(acquisition_trace)
+    # Final predictions
+    mu_final = interpolate_profit(points, profits, grid)
+    var_final = vkf.predict_var()
 
-if __name__ == "__main__":
+    # Plots
+    plot_final_surface(grid, mu_final, baristas_range, price_range)
+    plot_variance_surface(grid, var_final, baristas_range, price_range)
+    plot_voronoi(df)
+    plot_acquisition_trace(trace)
+
+if __name__ == '__main__':
     main()

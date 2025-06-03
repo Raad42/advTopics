@@ -1,9 +1,11 @@
 import subprocess
 import sys
+import os
 
 def run_simulation(price, baristas):
+    simulator_path = os.path.join('DES', 'simulator') 
     result = subprocess.run(
-        ['./simulator', str(price), str(baristas)],
+        [simulator_path, str(price), str(baristas)],
         capture_output=True,
         text=True
     )
