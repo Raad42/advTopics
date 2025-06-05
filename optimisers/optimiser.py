@@ -2,9 +2,12 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
 from scipy.spatial import Delaunay
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from run_simulation import run_simulation
 from pyDOE import lhs
-from plotting import (
+from plots.plotting import (
     plot_final_surface, plot_variance_surface,
     plot_voronoi, plot_acquisition_trace
 )
@@ -13,8 +16,8 @@ from plotting import (
 INIT_SAMPLES = 10
 MAX_ITER = 2000
 noise_std = 300.0
-lengthscale = 1.0   # for RBF kernel
-signal_var = 1.0    # prior signal variance
+lengthscale = 1.0 
+signal_var = 1.0    
 
 # Parameter space (grid)
 baristas_range = np.arange(1, 6)
@@ -28,7 +31,7 @@ class VectorKalmanVar:
         # Compute prior covariance K0 using RBF kernel
         dists = cdist(grid, grid, 'euclidean')
         K0 = signal_var * np.exp(-0.5 * (dists / lengthscale)**2)
-        # Initial covariance: prior + measurement noise on diagonal
+        # Initial covariance
         self.P = K0 + noise_var * np.eye(len(grid))
         self.noise_var = noise_var
 
@@ -106,6 +109,13 @@ def main():
         profit = run_simulation(p, b)
         data.append((best_idx, profit))
         vkf.update(best_idx)
+
+        if (i + 1) % 50 == 0:
+            vor_df = pd.DataFrame(
+                [ (grid[idx,0], grid[idx,1], prof) for idx, prof in data ],
+                columns=['baristas','price','profit']
+            )
+            plot_voronoi(vor_df, filename=f"voronoi_iter_{i+1}.png")
 
         if (i+1) % 100 == 0:
             print(f"[Iter {i+1}] idx={best_idx} (baristas={b}, price={p:.2f}) -> profit={profit:.2f}")
