@@ -19,6 +19,6 @@ for i in range(n_samples):
         print(f"[{i + 1}] b={b}, p={p:.2f} -> profit={profit:.2f}")
 
 df = pd.DataFrame(data, columns=["baristas", "price", "profit"])
-df.to_csv("results_random.csv", index=False)
+df.to_csv("results/RawResults/results_random.csv", index=False)
 plot_voronoi(df, filename="voronoi_random.png")
 print("✅ Random search complete.")

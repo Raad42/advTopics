@@ -1,140 +1,225 @@
 import numpy as np
-import pandas as pd
-from scipy.spatial.distance import cdist
 from scipy.spatial import Delaunay
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from run_simulation import run_simulation
-from pyDOE import lhs
+
+# New plotting imports
 from plots.plotting import (
-    plot_final_surface, plot_variance_surface,
-    plot_voronoi, plot_acquisition_trace
+    plot_final_surface,
+    plot_variance_surface,
+    plot_voronoi as plot_voronoi_new,
+    plot_acquisition_trace
 )
 
-# Hyperparameters
-INIT_SAMPLES = 10
-MAX_ITER = 2000
-noise_std = 300.0
-lengthscale = 1.0 
-signal_var = 1.0    
+# ----------------------------------------------
+# 1. Latin Hypercube Sampling (LHS) for 2D
+# ----------------------------------------------
+def lhs_samples_2d(n, bounds):
+    dim = 2
+    cut = np.linspace(0, 1, n + 1)
+    u = np.random.rand(n, dim)
+    a = np.zeros((n, dim))
+    for j in range(dim):
+        perm = np.random.permutation(n)
+        a[:, j] = cut[perm]
+    L = a + u * (1.0 / n)
+    samples = np.zeros_like(L)
+    for j in range(dim):
+        lo, hi = bounds[j]
+        samples[:, j] = lo + L[:, j] * (hi - lo)
+    return samples
 
-# Parameter space (grid)
-baristas_range = np.arange(1, 6)
-price_range    = np.linspace(1, 10.0, 100)
-grid = np.array([[b, p] for b in baristas_range for p in price_range])
-n_grid = len(grid)
+def initialize_with_lhs(n_init=10, R_noise=1.0):
+    bounds = [(1.0, 6.0), (0.0, 10.0)]
+    cont = lhs_samples_2d(n_init, bounds)
 
-# Vector Kalman Filter for variance only
-class VectorKalmanVar:
-    def __init__(self, grid, lengthscale, signal_var, noise_var):
-        # Compute prior covariance K0 using RBF kernel
-        dists = cdist(grid, grid, 'euclidean')
-        K0 = signal_var * np.exp(-0.5 * (dists / lengthscale)**2)
-        # Initial covariance
-        self.P = K0 + noise_var * np.eye(len(grid))
-        self.noise_var = noise_var
+    nodes, profits = [], []
+    best_obs = -np.inf
+    best_params = (None, None)
 
-    def update(self, idx):
-        # Kalman variance-only update for measurement at idx
-        Pii = self.P[idx, idx]
-        K   = self.P[:, idx] / (Pii + self.noise_var)
-        # Covariance update: P <- P - K * P[idx, :]
-        self.P -= np.outer(K, self.P[idx, :])
+    for b_cont, p_cont in cont:
+        b_int = int(np.clip(round(b_cont), 1, 6))
+        y = run_simulation(p_cont, b_int)
+        nodes.append([float(b_int), p_cont])
+        profits.append(y)
+        if y > best_obs:
+            best_obs, best_params = y, (b_int, p_cont)
 
-    def predict_var(self):
-        # Return variance at all grid points
-        return np.diag(self.P).copy()
+    mu = np.array(profits)
+    σ0 = 1e4
+    P = σ0 * np.eye(n_init)
+    return nodes, mu, P, best_obs, best_params, R_noise
 
-# Delaunay interpolation for means
-def interpolate_profit(points, values, queries):
-    tri = Delaunay(points)
-    simplex = tri.find_simplex(queries)
-    valid = simplex >= 0
-    X = tri.transform[simplex[valid], :2]
-    Y = queries[valid] - tri.transform[simplex[valid], 2]
-    bary = np.einsum('ijk,ik->ij', X, Y)
-    bary_coords = np.c_[bary, 1 - bary.sum(axis=1)]
-    verts = tri.simplices[simplex[valid]]
-    interpolated = np.zeros(len(queries))
-    interpolated[valid] = np.einsum('ij,ij->i', values[verts], bary_coords)
-    return interpolated
+# ----------------------------------------------
+# 2. Interpolation helpers & 3. Kalman update
+# ----------------------------------------------
+def barycentric_coordinates(tri_pts, x):
+    T = np.vstack([tri_pts.T, np.ones(3)])
+    v = np.append(x, 1.0)
+    return np.linalg.solve(T, v)
 
-# Acquisition function (UCB)
-def acquisition(mu, sigma, beta=2.0):
-    return mu + beta * np.sqrt(sigma)
+def interpolate_mean_and_sigma(x, nodes, mu, P, delaunay, alpha=1.0):
+    idx = int(delaunay.find_simplex(x.reshape(1, -1))[0])
+    if idx < 0:
+        return None, None
+    verts = delaunay.simplices[idx]
+    pts = np.asarray(nodes)[verts]
+    λ = barycentric_coordinates(pts, x)
+    mu_interp = sum(λ[i] * mu[verts[i]] for i in range(3))
+    prior_var = sum((λ[i]**2) * P[verts[i], verts[i]] for i in range(3))
+    dists = [np.linalg.norm(x - pts[i]) for i in range(3)]
+    sigma = np.sqrt(prior_var + alpha * (max(dists)**2))
+    return mu_interp, sigma
 
-# Latin Hypercube sampling over grid indices
-def sample_grid_indices(n):
-    lhs_samples = lhs(2, samples=n, criterion='maximin')
-    b_idx = np.floor(lhs_samples[:, 0] * len(baristas_range)).astype(int)
-    p_idx = np.floor(lhs_samples[:, 1] * len(price_range)).astype(int)
-    b_idx = np.clip(b_idx, 0, len(baristas_range)-1)
-    p_idx = np.clip(p_idx, 0, len(price_range)-1)
-    return b_idx * len(price_range) + p_idx
+def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alpha=2.0):
+    x_new = np.asarray(next_point)
+    for i, pt in enumerate(nodes):
+        if np.allclose(pt, x_new, atol=1e-6):
+            # rank-one update
+            y_new = run_simulation(x_new[1], int(x_new[0]))
+            H = np.zeros((1, len(nodes))); H[0, i] = 1.0
+            S = H @ P @ H.T + R_noise
+            K = (P @ H.T) / S
+            mu_post = mu + (K.flatten() * (y_new - H @ mu))
+            P_post = P - (K @ H @ P)
+            if y_new > best_obs:
+                best_obs, best_params = y_new, (int(x_new[0]), float(x_new[1]))
+            return nodes, mu_post, P_post, best_obs, best_params
 
-# Main optimization loop
-def main():
-    # Initialize variance filter
-    vkf = VectorKalmanVar(grid, lengthscale, signal_var, noise_std**2)
-    data = []       # list of (idx, profit)
-    trace = []
+    # new point
+    if len(nodes) < 3:
+        return nodes, mu, P, best_obs, best_params
 
-    # Initial sampling
-    init_idx = sample_grid_indices(INIT_SAMPLES)
-    for idx in init_idx:
-        b, p = grid[idx]
-        profit = run_simulation(p, b)
-        # record data and update variance
-        data.append((idx, profit))
-        vkf.update(idx)
+    delaunay = Delaunay(np.asarray(nodes))
+    mu0, sigma0 = interpolate_mean_and_sigma(x_new, nodes, mu, P, delaunay, alpha)
+    if mu0 is None:
+        return nodes, mu, P, best_obs, best_params
 
-    # Iterative optimization
-    for i in range(MAX_ITER):
-        # Retrieve sampled points for mean interpolation
-        points = np.array([grid[idx] for idx, _ in data])
-        profits = np.array([profit for _, profit in data])
-        # Mean prediction via Delaunay
-        mu_pred = interpolate_profit(points, profits, grid)
-        # Variance prediction via Kalman
-        sigma_pred = vkf.predict_var()
+    N = len(nodes)
+    # covariances
+    tri_idx = int(delaunay.find_simplex(x_new.reshape(1, -1))[0])
+    verts = delaunay.simplices[tri_idx]
+    λ = barycentric_coordinates(np.asarray(nodes)[verts], x_new)
+    cov_old = np.zeros(N)
+    for jj, ii in enumerate(verts):
+        cov_old[ii] = λ[jj] * P[ii, ii]
 
-        # Acquisition
-        scores = acquisition(mu_pred, sigma_pred)
-        best_idx = np.argmax(scores)
-        trace.append(scores[best_idx])
+    mu_aug = np.concatenate([mu, [mu0]])
+    P_aug = np.zeros((N+1, N+1))
+    P_aug[:N, :N] = P
+    P_aug[:N, N] = cov_old
+    P_aug[N, :N] = cov_old
+    P_aug[N, N] = sigma0**2
 
-        # Evaluate and update
-        b, p = grid[best_idx]
-        profit = run_simulation(p, b)
-        data.append((best_idx, profit))
-        vkf.update(best_idx)
+    y_new = run_simulation(x_new[1], int(x_new[0]))
+    H = np.zeros((1, N+1)); H[0, N] = 1.0
+    S = H @ P_aug @ H.T + R_noise
+    K = (P_aug @ H.T) / S
+    mu_post = mu_aug + (K.flatten() * (y_new - H @ mu_aug))
+    P_post = P_aug - (K @ H @ P_aug)
 
-        if (i + 1) % 50 == 0:
-            vor_df = pd.DataFrame(
-                [ (grid[idx,0], grid[idx,1], prof) for idx, prof in data ],
-                columns=['baristas','price','profit']
+    nodes_new = nodes + [[float(x_new[0]), float(x_new[1])]]
+    if y_new > best_obs:
+        best_obs, best_params = y_new, (int(x_new[0]), float(x_new[1]))
+    return nodes_new, mu_post, P_post, best_obs, best_params
+
+# ----------------------------------------------
+# 4. UCB proposal (returns candidate + its UCB)
+# ----------------------------------------------
+def propose_next_ucb_discrete_b(nodes, mu, P, delaunay,
+                                M_per_b=4000, kappa=5.0, alpha=3.0):
+    """
+    Evaluate UCB at each existing node AND at M_per_b random prices
+    for each barista 1..6. Return the (b,p) with highest UCB and that UCB.
+    """
+    best_ucb = -np.inf
+    best_cand = None
+
+    # 1) First, consider all existing nodes:
+    for (b, p), μ_val in zip(nodes, mu):
+        # compute sigma at that exact node
+        σ_val = np.sqrt(P[int(nodes.index([b, p])), int(nodes.index([b, p]))])
+        ucb = μ_val + kappa * σ_val
+        if ucb > best_ucb:
+            best_ucb, best_cand = ucb, [float(b), float(p)]
+
+    # 2) Then sample randomly as before:
+    for b in range(1, 7):
+        prices = np.random.uniform(0, 10, M_per_b)
+        for p in prices:
+            x = np.array([float(b), p])
+            μ_val, σ_val = interpolate_mean_and_sigma(x, nodes, mu, P, delaunay, alpha)
+            if μ_val is None:
+                continue
+            ucb = μ_val + kappa * σ_val
+            if ucb > best_ucb:
+                best_ucb, best_cand = ucb, [float(b), p]
+
+    return best_cand, best_ucb
+
+# ----------------------------------------------
+# 5. Main optimization loop with plotting
+# ----------------------------------------------
+if __name__ == "__main__":
+    # init
+    n_initial, R_noise_est = 10, 450**2
+    nodes, mu, P, best_obs, best_params, R_noise = initialize_with_lhs(
+        n_init=n_initial, R_noise=R_noise_est
+    )
+    print("Initial best:", best_obs, "at", best_params)
+
+    acq_trace = []
+    n_iterations, kappa, alpha = 200, 5.0, 3.0
+
+    for iteration in range(1, n_iterations + 1):
+        delaunay = Delaunay(np.asarray(nodes))
+
+        if np.random.rand() < 0.1:
+            next_pt = [float(np.random.randint(1,7)), np.random.uniform(0,10)]
+            ucb_val = None
+        else:
+            next_pt, ucb_val = propose_next_ucb_discrete_b(
+                nodes, mu, P, delaunay, M_per_b=400, kappa=kappa, alpha=alpha
             )
-            plot_voronoi(vor_df, filename=f"voronoi_iter_{i+1}.png")
+        if ucb_val is not None:
+            acq_trace.append(ucb_val)
 
-        if (i+1) % 100 == 0:
-            print(f"[Iter {i+1}] idx={best_idx} (baristas={b}, price={p:.2f}) -> profit={profit:.2f}")
+        nodes, mu, P, best_obs, best_params = one_iteration(
+            nodes, mu, P, next_pt, best_obs, best_params, R_noise, alpha=alpha
+        )
 
-    # Save results
-    df = pd.DataFrame([ (grid[idx,0], grid[idx,1], prof) for idx, prof in data ],
-                      columns=['baristas','price','profit'])
-    df.to_csv('results.csv', index=False)
-    print('Done. Results in results.csv')
+        # logging
+        if iteration % 10 == 0:
+            print(f"Iter {iteration}: best observed = {best_obs:.3f} at {best_params}")
 
-    # Final predictions
-    mu_final = interpolate_profit(points, profits, grid)
-    var_final = vkf.predict_var()
+        # plotting every 50 iters and at end
+        if iteration in [50, 100, 200]:
+            print(f"--- Generating plots at iter {iteration} ---")
+            baristas = np.arange(1,7)
+            prices = np.linspace(0,10,100)
+            grid = np.array([[b,p] for b in baristas for p in prices])
 
-    # Plots
-    plot_final_surface(grid, mu_final, baristas_range, price_range)
-    plot_variance_surface(grid, var_final, baristas_range, price_range)
-    plot_voronoi(df)
-    plot_acquisition_trace(trace)
+            # compute grid values
+            μg, vg = [], []
+            delaunay = Delaunay(np.asarray(nodes))
+            for pt in grid:
+                μ, σ = interpolate_mean_and_sigma(pt, nodes, mu, P, delaunay, alpha)
+                μg.append(μ if μ is not None else 0.0)
+                vg.append((σ**2) if σ is not None else 0.0)
+            μg, vg = np.array(μg), np.array(vg)
 
-if __name__ == '__main__':
-    main()
+            plot_final_surface(grid, μg, baristas, prices, 
+                               filename=f"profit_surface_iter{iteration}.png")
+            plot_variance_surface(grid, vg, baristas, prices,
+                                  filename=f"variance_surface_iter{iteration}.png")
+            import pandas as pd
+            df = pd.DataFrame(nodes, columns=["baristas","price"])
+            plot_voronoi_new(df, filename=f"voronoi_iter{iteration}.png")
+            plot_acquisition_trace(acq_trace, filename="acquisition_trace.png")
+
+    # final summary
+    print("=== Optimization complete ===")
+    # reuse same grid + μg/vg from iter 200
+    plot_final_surface(grid, μg, baristas, prices, filename="final_profit_surface.png")
+    plot_variance_surface(grid, vg, baristas, prices, filename="final_variance_surface.png")
+    plot_acquisition_trace(acq_trace, filename="final_acquisition_trace.png")
+    print("Saved all final plots.") 

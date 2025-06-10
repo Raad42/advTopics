@@ -25,15 +25,16 @@ def plot_final_surface(grid, mu, baristas_range, price_range, filename="profit_s
     print(f"Saved profit surface as '{filename}'")
 
 
-def plot_variance_surface(grid, variances, baristas_range, price_range):
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
-
+def plot_variance_surface(grid, variances, baristas_range, price_range, filename="variance_surface.png"):
+    """
+    Plot the estimated uncertainty (variance) surface over the grid.
+    """
+    # Build meshgrid of (baristas, price)
     X = np.array([pt[0] for pt in grid]).reshape(len(baristas_range), len(price_range)).T
     Y = np.array([pt[1] for pt in grid]).reshape(len(baristas_range), len(price_range)).T
-    Z = variances.reshape(len(baristas_range), len(price_range)).T  # <-- key reshape fix
+    Z = variances.reshape(len(baristas_range), len(price_range)).T
 
-    fig = plt.figure()
+    fig = plt.figure(figsize=(10, 6))
     ax = fig.add_subplot(111, projection='3d')
     ax.plot_surface(X, Y, Z, cmap='plasma', alpha=0.9)
     ax.set_title("Estimated Uncertainty Surface (Variance)")
@@ -41,9 +42,8 @@ def plot_variance_surface(grid, variances, baristas_range, price_range):
     ax.set_ylabel("Price ($)")
     ax.set_zlabel("Variance")
     plt.tight_layout()
-    plt.savefig('plot.png')
-
-
+    plt.savefig(filename)
+    print(f"Saved variance surface as '{filename}'")
 
 
 def plot_voronoi(df, filename="voronoi_diagram.png"):  
@@ -60,8 +60,8 @@ def plot_voronoi(df, filename="voronoi_diagram.png"):
         ax.set_xlabel('Baristas')
         ax.set_ylabel('Price')
         ax.set_title('Voronoi Diagram of Sampled Points')
-        ax.set_xlim([points[:, 0].min()-1, points[:, 0].max()+1])
-        ax.set_ylim([points[:, 1].min()-1, points[:, 1].max()+1])
+        ax.set_xlim([points[:, 0].min() - 1, points[:, 0].max() + 1])
+        ax.set_ylim([points[:, 1].min() - 1, points[:, 1].max() + 1])
         ax.legend()
         plt.tight_layout()
         plt.savefig(filename)

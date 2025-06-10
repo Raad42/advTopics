@@ -37,6 +37,6 @@ for i in range(1, n_iter):
 # Save
 df = pd.DataFrame([(grid[idx][0], grid[idx][1], prof) for idx, prof in data],
                   columns=["baristas", "price", "profit"])
-df.to_csv("results_eps_greedy.csv", index=False)
-plot_voronoi(df, filename="voronoi_eps_greedy.png")
+df.to_csv("results/RawResults/results_eps_greedy.csv", index=False)
+plot_voronoi(df, filename="results/voronoiDiagram/voronoi_eps_greedy.png")
 print("✅ Epsilon-Greedy complete.")
