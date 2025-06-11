@@ -2,29 +2,35 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra
 
-# Source files
-SRCS = Simulator.cpp CoffeeShop.cpp
+# Folders
+SRC_DIR = DES
+OBJ_DIR = build
 
-# Header files
-HDRS = Event.h Customer.h Barista.h Statistics.h CoffeeShop.h
+# Source files (with path)
+SRCS = $(wildcard $(SRC_DIR)/*.cpp)
+OBJS = $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 
-# Object files
-OBJS = $(SRCS:.cpp=.o)
+# Header files (with path)
+HDRS = $(wildcard $(SRC_DIR)/*.h)
 
 # Output binary
 TARGET = simulator
 
+# Default rule
+all: $(TARGET)
+
 # Build target
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^
 
-# Rule for object files - makes objects depend on both .cpp and all header files
-%.o: %.cpp $(HDRS)
+# Rule for compiling source files to object files
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(HDRS)
+	@mkdir -p $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean rule
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -rf $(OBJ_DIR) $(TARGET)
 
 # Run rule
 run: $(TARGET)

@@ -12,10 +12,9 @@ int main(int argc, char* argv[]) {
     double price = std::atof(argv[1]);
     int baristas = std::atoi(argv[2]);
 
-    int machines = 2;
     double operatingHours = 840.0;
 
-    CoffeeShop shop(price, baristas, machines, operatingHours);
+    CoffeeShop shop(price, baristas, baristas, operatingHours);
     shop.generateCustomers();  
     shop.runSimulation();
 

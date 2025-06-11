@@ -36,6 +36,7 @@ private:
     double currentTime = 0.0;
     double lastEventTime = 0.0;
     double peakHourMultiplier = 2;  
+    double priceSensitivity = 1;
 
     double baristaWagePerHour = 15.0;
     double machineCostPerHour = 5.0;

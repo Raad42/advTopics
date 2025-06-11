@@ -2,7 +2,6 @@ import numpy as np
 from scipy.spatial import Delaunay
 from run_simulation import run_simulation
 
-# New plotting imports
 from plots.plotting import (
     plot_final_surface,
     plot_variance_surface,
@@ -28,8 +27,8 @@ def lhs_samples_2d(n, bounds):
         samples[:, j] = lo + L[:, j] * (hi - lo)
     return samples
 
-def initialize_with_lhs(n_init=10, R_noise=1.0):
-    bounds = [(1.0, 6.0), (0.0, 10.0)]
+def initialize_with_lhs(n_init=5, R_noise=1.0):
+    bounds = [(1.0, 10.0), (0.0, 20.0)]
     cont = lhs_samples_2d(n_init, bounds)
 
     nodes, profits = [], []
@@ -37,7 +36,7 @@ def initialize_with_lhs(n_init=10, R_noise=1.0):
     best_params = (None, None)
 
     for b_cont, p_cont in cont:
-        b_int = int(np.clip(round(b_cont), 1, 6))
+        b_int = int(np.clip(round(b_cont), 1, 10))
         y = run_simulation(p_cont, b_int)
         nodes.append([float(b_int), p_cont])
         profits.append(y)
@@ -74,7 +73,6 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
     x_new = np.asarray(next_point)
     for i, pt in enumerate(nodes):
         if np.allclose(pt, x_new, atol=1e-6):
-            # rank-one update
             y_new = run_simulation(x_new[1], int(x_new[0]))
             H = np.zeros((1, len(nodes))); H[0, i] = 1.0
             S = H @ P @ H.T + R_noise
@@ -85,7 +83,6 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
                 best_obs, best_params = y_new, (int(x_new[0]), float(x_new[1]))
             return nodes, mu_post, P_post, best_obs, best_params
 
-    # new point
     if len(nodes) < 3:
         return nodes, mu, P, best_obs, best_params
 
@@ -95,7 +92,6 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
         return nodes, mu, P, best_obs, best_params
 
     N = len(nodes)
-    # covariances
     tri_idx = int(delaunay.find_simplex(x_new.reshape(1, -1))[0])
     verts = delaunay.simplices[tri_idx]
     λ = barycentric_coordinates(np.asarray(nodes)[verts], x_new)
@@ -123,28 +119,14 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
     return nodes_new, mu_post, P_post, best_obs, best_params
 
 # ----------------------------------------------
-# 4. UCB proposal (returns candidate + its UCB)
+# 4. UCB proposal
 # ----------------------------------------------
 def propose_next_ucb_discrete_b(nodes, mu, P, delaunay,
                                 M_per_b=4000, kappa=5.0, alpha=3.0):
-    """
-    Evaluate UCB at each existing node AND at M_per_b random prices
-    for each barista 1..6. Return the (b,p) with highest UCB and that UCB.
-    """
     best_ucb = -np.inf
     best_cand = None
-
-    # 1) First, consider all existing nodes:
-    for (b, p), μ_val in zip(nodes, mu):
-        # compute sigma at that exact node
-        σ_val = np.sqrt(P[int(nodes.index([b, p])), int(nodes.index([b, p]))])
-        ucb = μ_val + kappa * σ_val
-        if ucb > best_ucb:
-            best_ucb, best_cand = ucb, [float(b), float(p)]
-
-    # 2) Then sample randomly as before:
-    for b in range(1, 7):
-        prices = np.random.uniform(0, 10, M_per_b)
+    for b in range(1, 11):
+        prices = np.random.uniform(0, 20, M_per_b)
         for p in prices:
             x = np.array([float(b), p])
             μ_val, σ_val = interpolate_mean_and_sigma(x, nodes, mu, P, delaunay, alpha)
@@ -153,14 +135,12 @@ def propose_next_ucb_discrete_b(nodes, mu, P, delaunay,
             ucb = μ_val + kappa * σ_val
             if ucb > best_ucb:
                 best_ucb, best_cand = ucb, [float(b), p]
-
     return best_cand, best_ucb
 
 # ----------------------------------------------
-# 5. Main optimization loop with plotting
+# 5. Main optimization loop
 # ----------------------------------------------
 if __name__ == "__main__":
-    # init
     n_initial, R_noise_est = 10, 450**2
     nodes, mu, P, best_obs, best_params, R_noise = initialize_with_lhs(
         n_init=n_initial, R_noise=R_noise_est
@@ -174,7 +154,7 @@ if __name__ == "__main__":
         delaunay = Delaunay(np.asarray(nodes))
 
         if np.random.rand() < 0.1:
-            next_pt = [float(np.random.randint(1,7)), np.random.uniform(0,10)]
+            next_pt = [float(np.random.randint(1,11)), np.random.uniform(0,20)]
             ucb_val = None
         else:
             next_pt, ucb_val = propose_next_ucb_discrete_b(
@@ -187,18 +167,15 @@ if __name__ == "__main__":
             nodes, mu, P, next_pt, best_obs, best_params, R_noise, alpha=alpha
         )
 
-        # logging
         if iteration % 10 == 0:
             print(f"Iter {iteration}: best observed = {best_obs:.3f} at {best_params}")
 
-        # plotting every 50 iters and at end
         if iteration in [50, 100, 200]:
             print(f"--- Generating plots at iter {iteration} ---")
-            baristas = np.arange(1,7)
-            prices = np.linspace(0,10,100)
-            grid = np.array([[b,p] for b in baristas for p in prices])
+            baristas = np.arange(1, 11)
+            prices = np.linspace(0, 20, 100)
+            grid = np.array([[b, p] for b in baristas for p in prices])
 
-            # compute grid values
             μg, vg = [], []
             delaunay = Delaunay(np.asarray(nodes))
             for pt in grid:
@@ -207,19 +184,17 @@ if __name__ == "__main__":
                 vg.append((σ**2) if σ is not None else 0.0)
             μg, vg = np.array(μg), np.array(vg)
 
-            plot_final_surface(grid, μg, baristas, prices, 
+            plot_final_surface(grid, μg, baristas, prices,
                                filename=f"profit_surface_iter{iteration}.png")
             plot_variance_surface(grid, vg, baristas, prices,
                                   filename=f"variance_surface_iter{iteration}.png")
             import pandas as pd
-            df = pd.DataFrame(nodes, columns=["baristas","price"])
+            df = pd.DataFrame(nodes, columns=["baristas", "price"])
             plot_voronoi_new(df, filename=f"voronoi_iter{iteration}.png")
             plot_acquisition_trace(acq_trace, filename="acquisition_trace.png")
 
-    # final summary
     print("=== Optimization complete ===")
-    # reuse same grid + μg/vg from iter 200
     plot_final_surface(grid, μg, baristas, prices, filename="final_profit_surface.png")
     plot_variance_surface(grid, vg, baristas, prices, filename="final_variance_surface.png")
     plot_acquisition_trace(acq_trace, filename="final_acquisition_trace.png")
-    print("Saved all final plots.") 
+    print("Saved all final plots.")

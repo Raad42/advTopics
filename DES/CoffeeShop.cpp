@@ -16,27 +16,29 @@ CoffeeShop::CoffeeShop(double pricePerCup, int numBaristas, int numMachines, dou
     // Set up random number generator
     std::random_device rd;
     rng = std::mt19937(rd());
+
+    // Parameters for price sensitivity (tune as needed)
+    double baseMeanInterarrival = 0.8;   // Slightly higher base interval (less dense demand)
+    double priceSensitivity = 0.5;       // Moderate sensitivity (was 1.5, too high)
+    double priceBaseline = 1.5;          // Baseline price remains $5
     
-    // Base distributions
-    interarrivalDist    = std::exponential_distribution<double>(1.0/0.5);  // mean 2 min
-    regularServiceDist  = std::normal_distribution<double>(3.0, 1.0);    // mean 3±1
-    complexServiceDist  = std::normal_distribution<double>(5.0, 1.5);    // mean 5±1.5
-    groupSizeDist       = std::poisson_distribution<int>(2);             // mean 2 additional
-    patienceDist        = std::uniform_real_distribution<double>(10.0, 45.0); // 10–45 min
-    customerTypeDist    = std::discrete_distribution<int>({70,25,5});    // 70% reg,25% cmp,5% grp
+    // Simple exponential decay for all prices above baseline
+    double demandFactor = std::exp(-priceSensitivity * std::max(0.0, (pricePerCup - priceBaseline) / priceBaseline));
+    double adjustedMeanInterarrival = baseMeanInterarrival / demandFactor;
+
+    // Base distributions with reduced noise
+    interarrivalDist    = std::exponential_distribution<double>(1.0 / adjustedMeanInterarrival);  // adjusted mean
+    regularServiceDist  = std::normal_distribution<double>(3.0, 0.5);    // reduced std dev from 1.0 to 0.5
+    complexServiceDist  = std::normal_distribution<double>(5.0, 0.75);   // reduced std dev from 1.5 to 0.75
+    groupSizeDist       = std::poisson_distribution<int>(2);             // unchanged
+    patienceDist        = std::uniform_real_distribution<double>(10.0, 45.0); // unchanged
+    customerTypeDist    = std::discrete_distribution<int>({70,25,5});    // unchanged
     
-    //Create baristas
+    // Create baristas (all competent for now)
     for (int i = 0; i < totalBaristas; ++i) {
-        double roll = std::uniform_real_distribution<double>(0,1)(rng);
-
-        BaristaSkill skill;
-        double speedMod;
-
-        //Made every employee same skill for now 
-        skill = BaristaSkill::COMPETENT;
-        speedMod = 1.0; 
-       
-        baristas.push_back({i,false,skill,speedMod,0});
+        BaristaSkill skill = BaristaSkill::COMPETENT;
+        double speedMod = 1.0; 
+        baristas.push_back({i, false, skill, speedMod, 0});
     }
     
     // Prepare hourly stats
@@ -44,7 +46,6 @@ CoffeeShop::CoffeeShop(double pricePerCup, int numBaristas, int numMachines, dou
     stats.hourlyRevenue.resize(numHours, 0.0);
     stats.hourlyCustomers.resize(numHours, 0);
 }
-
 
 void CoffeeShop::generateCustomers() {
     double time = 0.0;
@@ -54,9 +55,8 @@ void CoffeeShop::generateCustomers() {
     };
     
     while (time < operatingHours) {
-        // draw base interval, then stretch by pricePerCup
         double rawInterval  = interarrivalDist(rng);
-        double nextInterval = (rawInterval * pricePerCup) / getHourlyMultiplier(time);
+        double nextInterval = rawInterval / getHourlyMultiplier(time);
         
         time += nextInterval;
         if (time >= operatingHours) break;
@@ -119,7 +119,7 @@ void CoffeeShop::runSimulation() {
 
 void CoffeeShop::handleArrival(const Event& e) {
     Customer& c = allCustomers[e.customerId];
-    //Do not accept new customers last 30 mins 
+    // Do not accept new customers last 30 mins 
     if (currentTime >= operatingHours - 30.0) {
         c.abandoned = true; stats.customersLost++; return;
     }
@@ -153,7 +153,9 @@ double CoffeeShop::getServiceTimeFactor(CustomerType type,
     double f=1.0;
 
     if (type==CustomerType::COMPLEX)         f*=1.2;
-    std::uniform_real_distribution<double> v(0.9,1.1);
+
+    // Reduced noise: uniform between 0.95 and 1.05
+    std::uniform_real_distribution<double> v(0.95, 1.05);
     return f * v(rng);
 }
 
@@ -229,7 +231,7 @@ double CoffeeShop::getHourlyMultiplier(double t) {
 }
 
 void CoffeeShop::updateHourlyStats() {
-      // Operating time in hours
+    // Operating time in hours
     double hours = operatingHours / 60.0;
 
     // Fixed Costs
@@ -253,7 +255,6 @@ void CoffeeShop::updateHourlyStats() {
     stats.costs = baristaCost + machineCost + rentCost + ingredientCost;
 
     stats.profit = stats.totalRevenue - stats.costs; 
-
 }
 
 void CoffeeShop::printStatistics() {
@@ -297,8 +298,8 @@ void CoffeeShop::printStatistics() {
                    : 0.0;
         std::cout << std::setw(4) << i << " | "
                   << std::setw(4) << stats.hourlyCustomers[i] << " | $"
-                  << std::setw(4) << stats.hourlyRevenue[i]   << " | $"
-                  << std::setw(4) << avg << "\n";
+                  << std::setw(6) << stats.hourlyRevenue[i]   << " | $"
+                  << std::setw(6) << avg << "\n";
     }
     std::cout << "\n===== END OF REPORT =====\n";
 
@@ -337,9 +338,8 @@ void CoffeeShop::printStatistics() {
     std::cout << "NET PROFIT:\n";
     std::cout << "Profit: $" << stats.profit << "\n";
     std::cout << "Profit per Hour: $" << stats.profit / hours << "\n";
-
 }
 
 double CoffeeShop::returnResults(){
     return stats.profit;
-}   
+}
