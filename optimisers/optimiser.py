@@ -29,12 +29,31 @@ def lhs_samples_2d(n, bounds):
 
 def initialize_with_lhs(n_init=10, R_noise=1.0):
     bounds = [(1.0, 10.0), (0.0, 20.0)]
-    cont = lhs_samples_2d(n_init, bounds)
-
+    
+    # ---- 1) Seed the hull points ----
+    # Four corners:
+    hull_pts = [[1.0, 0.0], [1.0, 20.0], [10.0, 0.0], [10.0, 20.0]]
+    # You could uncomment to add all barista edges:
+    # for b in range(1, 11):
+    #     hull_pts += [[float(b), 0.0], [float(b), 20.0]]
+    
     nodes, profits = [], []
     best_obs = -np.inf
     best_params = (None, None)
-
+    
+    # Evaluate each hull point
+    for b, p in hull_pts:
+        y = run_simulation(p, int(b))
+        nodes.append([b, p])
+        profits.append(y)
+        if y > best_obs:
+            best_obs, best_params = y, (int(b), p)
+    
+    # ---- 2) Latin hypercube for the remainder ----
+    # we want a total of n_init including hull, so sample n_lhs = n_init - len(hull_pts)
+    n_lhs = max(0, n_init - len(hull_pts))
+    cont = lhs_samples_2d(n_lhs, bounds) if n_lhs > 0 else np.empty((0,2))
+    
     for b_cont, p_cont in cont:
         b_int = int(np.clip(round(b_cont), 1, 10))
         y = run_simulation(p_cont, b_int)
@@ -42,11 +61,12 @@ def initialize_with_lhs(n_init=10, R_noise=1.0):
         profits.append(y)
         if y > best_obs:
             best_obs, best_params = y, (b_int, p_cont)
-
+    
     mu = np.array(profits)
     σ0 = 1e4
-    P = σ0 * np.eye(n_init)
+    P = σ0 * np.eye(len(nodes))
     return nodes, mu, P, best_obs, best_params, R_noise
+
 
 # ----------------------------------------------
 # 2. Interpolation helpers & fallback (Option 1)
@@ -163,18 +183,22 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
 # 4. UCB proposal
 # ----------------------------------------------
 def propose_next_ucb_discrete_b(nodes, mu, P, delaunay,
-                                M_per_b=4000, kappa=2.0, alpha=3.0):
+                                M_per_b=4000, kappa=10.0, alpha=3.0):
     best_ucb = -np.inf
     best_cand = None
+    print("\n--- UCB Evaluation for Proposed Points ---")
     for b in range(1, 11):
         prices = np.random.uniform(0, 20, M_per_b)
         for p in prices:
             x = np.array([float(b), p])
             μ_val, σ_val = interpolate_mean_and_sigma(x, nodes, mu, P, delaunay, alpha)
             ucb = μ_val + kappa * σ_val
+            print(f"b: {b:2d}, p: {p:6.3f}, μ: {μ_val:8.3f}, σ: {σ_val:8.3f}, UCB: {ucb:8.3f}")
             if ucb > best_ucb:
                 best_ucb, best_cand = ucb, [float(b), p]
+    print("--- End of UCB Evaluation ---\n")
     return best_cand, best_ucb
+
 
 # ----------------------------------------------
 # 5. Main optimization loop
@@ -187,7 +211,7 @@ if __name__ == "__main__":
     print("Initial best:", best_obs, "at", best_params)
 
     acq_trace = []
-    n_iterations, kappa, alpha = 200, 2.0, 3.0
+    n_iterations, kappa, alpha = 200, 10.0, 3.0
 
     for iteration in range(1, n_iterations + 1):
         delaunay = Delaunay(np.asarray(nodes))
