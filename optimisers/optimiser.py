@@ -27,7 +27,7 @@ def lhs_samples_2d(n, bounds):
         samples[:, j] = lo + L[:, j] * (hi - lo)
     return samples
 
-def initialize_with_lhs(n_init=5, R_noise=1.0):
+def initialize_with_lhs(n_init=10, R_noise=1.0):
     bounds = [(1.0, 10.0), (0.0, 20.0)]
     cont = lhs_samples_2d(n_init, bounds)
 
@@ -122,7 +122,7 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
 # 4. UCB proposal
 # ----------------------------------------------
 def propose_next_ucb_discrete_b(nodes, mu, P, delaunay,
-                                M_per_b=4000, kappa=5.0, alpha=3.0):
+                                M_per_b=4000, kappa=2.0, alpha=3.0):
     best_ucb = -np.inf
     best_cand = None
     for b in range(1, 11):
@@ -148,20 +148,29 @@ if __name__ == "__main__":
     print("Initial best:", best_obs, "at", best_params)
 
     acq_trace = []
-    n_iterations, kappa, alpha = 200, 5.0, 3.0
+    n_iterations, kappa, alpha = 200, 2.0, 3.0
 
     for iteration in range(1, n_iterations + 1):
         delaunay = Delaunay(np.asarray(nodes))
 
         if np.random.rand() < 0.1:
-            next_pt = [float(np.random.randint(1,11)), np.random.uniform(0,20)]
-            ucb_val = None
+            next_pt = [float(np.random.randint(1, 11)), np.random.uniform(0, 20)]
+            μ_val, σ_val, ucb_val = None, None, None
         else:
             next_pt, ucb_val = propose_next_ucb_discrete_b(
                 nodes, mu, P, delaunay, M_per_b=400, kappa=kappa, alpha=alpha
             )
+            μ_val, σ_val = interpolate_mean_and_sigma(
+                np.array(next_pt), nodes, mu, P, delaunay, alpha=alpha
+            )
+
         if ucb_val is not None:
             acq_trace.append(ucb_val)
+
+        # ---- DEBUG PRINT ----
+        print(f"[Iter {iteration}] Next point: {next_pt}")
+        if μ_val is not None and σ_val is not None:
+            print(f"  UCB: {ucb_val:.3f}, Posterior μ: {μ_val:.3f}, σ²: {σ_val:.3f}")
 
         nodes, mu, P, best_obs, best_params = one_iteration(
             nodes, mu, P, next_pt, best_obs, best_params, R_noise, alpha=alpha

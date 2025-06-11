@@ -5,13 +5,12 @@ import numpy as np
 
 # Updated plotting functions for vector-Kalman output
 
-def plot_final_surface(grid, mu, baristas_range, price_range, filename="profit_surface.png"):  
+def plot_final_surface(grid, mu, baristas_range, price_range, filename="profit_surface.png"):
     """
     Plot final estimated profit surface given mean vector `mu` on full grid.
     """
-    # Reshape mu into meshgrid shape: rows=price, cols=baristas
     B, P = np.meshgrid(baristas_range, price_range)
-    Z = mu.reshape(P.shape)
+    Z = mu.reshape((len(baristas_range), len(price_range))).T  # <-- Fixed reshape
 
     fig = plt.figure(figsize=(10, 6))
     ax = fig.add_subplot(111, projection='3d')
@@ -23,6 +22,7 @@ def plot_final_surface(grid, mu, baristas_range, price_range, filename="profit_s
     plt.tight_layout()
     plt.savefig(filename)
     print(f"Saved profit surface as '{filename}'")
+
 
 
 def plot_variance_surface(grid, variances, baristas_range, price_range, filename="variance_surface.png"):

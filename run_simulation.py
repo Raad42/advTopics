@@ -3,7 +3,7 @@ import sys
 import os
 
 def run_simulation(price, baristas):
-    simulator_path = os.path.join('simulator') 
+    simulator_path = os.path.join('./simulator') 
     result = subprocess.run(
         [simulator_path, str(price), str(baristas)],
         capture_output=True,
