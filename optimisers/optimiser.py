@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, KDTree
 from run_simulation import run_simulation
 
 from plots.plotting import (
@@ -49,30 +49,60 @@ def initialize_with_lhs(n_init=10, R_noise=1.0):
     return nodes, mu, P, best_obs, best_params, R_noise
 
 # ----------------------------------------------
-# 2. Interpolation helpers & 3. Kalman update
+# 2. Interpolation helpers & fallback (Option 1)
 # ----------------------------------------------
 def barycentric_coordinates(tri_pts, x):
     T = np.vstack([tri_pts.T, np.ones(3)])
     v = np.append(x, 1.0)
     return np.linalg.solve(T, v)
 
+def fallback_mean_sigma(x, nodes, mu, P, k=3, alpha=1.0):
+    """
+    Nearest-neighbor fallback: use k nearest sampled nodes to estimate mean & variance.
+    """
+    tree = KDTree(nodes)
+    dists, idxs = tree.query(x, k=k)
+    # ensure arrays
+    dists = np.atleast_1d(dists)
+    idxs = np.atleast_1d(idxs)
+
+    # inverse-distance weights
+    weights = 1.0 / (dists + 1e-6)
+    weights /= np.sum(weights)
+
+    mu_interp = sum(weights[i] * mu[idxs[i]] for i in range(len(idxs)))
+    prior_var = sum((weights[i]**2) * P[idxs[i], idxs[i]] for i in range(len(idxs)))
+    sigma = np.sqrt(prior_var + alpha * (np.max(dists)**2))
+    return mu_interp, sigma
+
 def interpolate_mean_and_sigma(x, nodes, mu, P, delaunay, alpha=1.0):
+    """
+    Try barycentric interpolation; if outside hull, fallback to nearest neighbors.
+    """
     idx = int(delaunay.find_simplex(x.reshape(1, -1))[0])
     if idx < 0:
-        return None, None
+        # outside convex hull → fallback
+        return fallback_mean_sigma(x, nodes, mu, P, k=3, alpha=alpha)
+
     verts = delaunay.simplices[idx]
     pts = np.asarray(nodes)[verts]
     λ = barycentric_coordinates(pts, x)
+
     mu_interp = sum(λ[i] * mu[verts[i]] for i in range(3))
     prior_var = sum((λ[i]**2) * P[verts[i], verts[i]] for i in range(3))
     dists = [np.linalg.norm(x - pts[i]) for i in range(3)]
     sigma = np.sqrt(prior_var + alpha * (max(dists)**2))
+
     return mu_interp, sigma
 
+# ----------------------------------------------
+# 3. Kalman update per iteration
+# ----------------------------------------------
 def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alpha=2.0):
     x_new = np.asarray(next_point)
     for i, pt in enumerate(nodes):
         if np.allclose(pt, x_new, atol=1e-6):
+            # exact re-sample
             y_new = run_simulation(x_new[1], int(x_new[0]))
             H = np.zeros((1, len(nodes))); H[0, i] = 1.0
             S = H @ P @ H.T + R_noise
@@ -83,21 +113,31 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
                 best_obs, best_params = y_new, (int(x_new[0]), float(x_new[1]))
             return nodes, mu_post, P_post, best_obs, best_params
 
+    # need at least 3 points to interpolate
     if len(nodes) < 3:
         return nodes, mu, P, best_obs, best_params
 
     delaunay = Delaunay(np.asarray(nodes))
     mu0, sigma0 = interpolate_mean_and_sigma(x_new, nodes, mu, P, delaunay, alpha)
-    if mu0 is None:
-        return nodes, mu, P, best_obs, best_params
-
     N = len(nodes)
-    tri_idx = int(delaunay.find_simplex(x_new.reshape(1, -1))[0])
-    verts = delaunay.simplices[tri_idx]
-    λ = barycentric_coordinates(np.asarray(nodes)[verts], x_new)
+
+    # build augmented prior
     cov_old = np.zeros(N)
-    for jj, ii in enumerate(verts):
-        cov_old[ii] = λ[jj] * P[ii, ii]
+    tri_idx = int(delaunay.find_simplex(x_new.reshape(1, -1))[0])
+    if tri_idx >= 0:
+        verts = delaunay.simplices[tri_idx]
+        λ = barycentric_coordinates(np.asarray(nodes)[verts], x_new)
+        for jj, ii in enumerate(verts):
+            cov_old[ii] = λ[jj] * P[ii, ii]
+    else:
+        # fallback covariance share
+        # weight equally among k nearest
+        tree = KDTree(nodes)
+        dists, idxs = tree.query(x_new, k=3)
+        weights = 1.0 / (dists + 1e-6)
+        weights /= np.sum(weights)
+        for jj, ii in enumerate(np.atleast_1d(idxs)):
+            cov_old[ii] = weights[jj] * P[ii, ii]
 
     mu_aug = np.concatenate([mu, [mu0]])
     P_aug = np.zeros((N+1, N+1))
@@ -106,6 +146,7 @@ def one_iteration(nodes, mu, P, next_point, best_obs, best_params, R_noise, alph
     P_aug[N, :N] = cov_old
     P_aug[N, N] = sigma0**2
 
+    # observe new point
     y_new = run_simulation(x_new[1], int(x_new[0]))
     H = np.zeros((1, N+1)); H[0, N] = 1.0
     S = H @ P_aug @ H.T + R_noise
@@ -130,8 +171,6 @@ def propose_next_ucb_discrete_b(nodes, mu, P, delaunay,
         for p in prices:
             x = np.array([float(b), p])
             μ_val, σ_val = interpolate_mean_and_sigma(x, nodes, mu, P, delaunay, alpha)
-            if μ_val is None:
-                continue
             ucb = μ_val + kappa * σ_val
             if ucb > best_ucb:
                 best_ucb, best_cand = ucb, [float(b), p]
